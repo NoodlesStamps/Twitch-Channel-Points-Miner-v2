@@ -22,6 +22,14 @@ class Strategy(Enum):
     NUMBER_6 = auto()
     NUMBER_7 = auto()
     NUMBER_8 = auto()
+    KELLY_CRITERION = auto() # New Strategy
+
+    def __str__(self):
+        return self.name
+
+class KellyProbabilitySource(Enum):
+    ODDS_PERCENTAGE = auto()
+    USER_PERCENTAGE = auto()
 
     def __str__(self):
         return self.name
@@ -87,6 +95,8 @@ class BetSettings(object):
         "filter_condition",
         "delay",
         "delay_mode",
+        "kelly_fraction",
+        "kelly_probability_source",
     ]
 
     def __init__(
@@ -100,6 +110,8 @@ class BetSettings(object):
         filter_condition: FilterCondition = None,
         delay: float = None,
         delay_mode: DelayMode = None,
+        kelly_fraction: float = None,
+        kelly_probability_source: KellyProbabilitySource = None,
     ):
         self.strategy = strategy
         self.percentage = percentage
@@ -110,6 +122,8 @@ class BetSettings(object):
         self.filter_condition = filter_condition
         self.delay = delay
         self.delay_mode = delay_mode
+        self.kelly_fraction = kelly_fraction
+        self.kelly_probability_source = kelly_probability_source
 
     def default(self):
         self.strategy = self.strategy if self.strategy is not None else Strategy.SMART
@@ -128,9 +142,20 @@ class BetSettings(object):
         self.delay_mode = (
             self.delay_mode if self.delay_mode is not None else DelayMode.FROM_END
         )
+        self.kelly_fraction = self.kelly_fraction if self.kelly_fraction is not None else 0.5
+        self.kelly_probability_source = (
+            self.kelly_probability_source if self.kelly_probability_source is not None
+            else KellyProbabilitySource.ODDS_PERCENTAGE
+        )
 
     def __repr__(self):
-        return f"BetSettings(strategy={self.strategy}, percentage={self.percentage}, percentage_gap={self.percentage_gap}, max_points={self.max_points}, minimum_points={self.minimum_points}, stealth_mode={self.stealth_mode})"
+        base_repr = (f"BetSettings(strategy={self.strategy}, percentage={self.percentage}, percentage_gap={self.percentage_gap}, "
+                     f"max_points={self.max_points}, minimum_points={self.minimum_points}, stealth_mode={self.stealth_mode}, "
+                     f"delay={self.delay}, delay_mode={self.delay_mode}")
+        if self.strategy == Strategy.KELLY_CRITERION: # Check for actual enum member
+            base_repr += f", kelly_fraction={self.kelly_fraction}, kelly_probability_source={self.kelly_probability_source.name if self.kelly_probability_source else None}"
+        base_repr += ")"
+        return base_repr
 
 
 class Bet(object):
@@ -323,23 +348,103 @@ class Bet(object):
                 if difference < self.settings.percentage_gap
                 else self.__return_choice(OutcomeKeys.TOTAL_USERS)
             )
+        elif self.settings.strategy == Strategy.KELLY_CRITERION:
+            best_f_star = -float('inf')
+            chosen_outcome_index = None
+            calculated_amount_for_chosen_outcome = 0
 
-        if self.decision["choice"] is not None:
-            #index = char_decision_as_index(self.decision["choice"])
-            index = self.decision["choice"]
-            self.decision["id"] = self.outcomes[index]["id"]
-            self.decision["amount"] = min(
-                int(balance * (self.settings.percentage / 100)),
-                self.settings.max_points,
-            )
-            if (
-                self.settings.stealth_mode is True
-                and self.decision["amount"]
-                >= self.outcomes[index][OutcomeKeys.TOP_POINTS]
-            ):
-                reduce_amount = uniform(1, 5)
-                self.decision["amount"] = (
-                    self.outcomes[index][OutcomeKeys.TOP_POINTS] - reduce_amount
+            for i, outcome_data in enumerate(self.outcomes):
+                p_key = (
+                    OutcomeKeys.ODDS_PERCENTAGE
+                    if self.settings.kelly_probability_source == KellyProbabilitySource.ODDS_PERCENTAGE
+                    else OutcomeKeys.PERCENTAGE_USERS
                 )
-            self.decision["amount"] = int(self.decision["amount"])
+                p = outcome_data.get(p_key, 0.0) / 100.0 # Probabilities should be 0-1
+                if p == 0.0:
+                    continue
+
+                q = 1.0 - p
+
+                # Odds 'b' are net odds (payout multiplier - 1)
+                # E.g., if Twitch odds are 2.5 (you get 2.5x your bet back), b = 1.5
+                raw_odds = outcome_data.get(OutcomeKeys.ODDS, 0.0)
+                if raw_odds <= 1.0: # Must win more than staked
+                    continue
+                b = raw_odds - 1.0
+
+                value_check = (b * p) - q
+                if value_check > 0 and b > 0:
+                    f_star = value_check / b
+                    if f_star > best_f_star:
+                        best_f_star = f_star
+                        chosen_outcome_index = i
+                        calculated_amount_for_chosen_outcome = balance * f_star * self.settings.kelly_fraction
+
+            if chosen_outcome_index is not None:
+                self.decision["choice"] = chosen_outcome_index
+                self.decision["id"] = self.outcomes[chosen_outcome_index]["id"]
+                final_amount = int(calculated_amount_for_chosen_outcome)
+                final_amount = min(final_amount, self.settings.max_points) # Apply max_points cap
+                self.decision["amount"] = final_amount
+
+                # Populate kelly_details
+                chosen_outcome_data = self.outcomes[chosen_outcome_index]
+                p_chosen = 0.0
+                if self.settings.kelly_probability_source == KellyProbabilitySource.ODDS_PERCENTAGE:
+                    p_chosen = chosen_outcome_data.get(OutcomeKeys.ODDS_PERCENTAGE, 0) / 100.0
+                elif self.settings.kelly_probability_source == KellyProbabilitySource.USER_PERCENTAGE:
+                    p_chosen = chosen_outcome_data.get(OutcomeKeys.PERCENTAGE_USERS, 0) / 100.0
+
+                b_chosen = chosen_outcome_data.get(OutcomeKeys.ODDS, 0) - 1.0
+
+                self.decision["kelly_details"] = {
+                    "p": p_chosen,
+                    "b": b_chosen,
+                    "f_star_raw": best_f_star, # best_f_star is already (value_check / b)
+                    "kelly_fraction_applied": self.settings.kelly_fraction
+                }
+
+        # Finalize decision and amount for all strategies
+        if self.decision["choice"] is not None:
+            # Ensure 'id' is set if not already (e.g. by non-Kelly strategies not setting it directly)
+            if self.decision.get("id") is None: # Ensure id is set
+                 self.decision["id"] = self.outcomes[self.decision["choice"]]["id"]
+
+            # Amount finalization for non-Kelly strategies (if they didn't set it fully or need stealth)
+            if self.settings.strategy != Strategy.KELLY_CRITERION:
+                # If amount wasn't set by a specific non-Kelly strategy block, calculate it generally
+                if self.decision.get("amount") is None or self.decision.get("amount") == 0:
+                    self.decision["amount"] = min(
+                        int(balance * (self.settings.percentage / 100)),
+                        self.settings.max_points,
+                    )
+
+                # Apply stealth mode for non-Kelly strategies
+                chosen_outcome_details = self.outcomes[self.decision["choice"]]
+                top_points_on_chosen = chosen_outcome_details.get(OutcomeKeys.TOP_POINTS, float('inf'))
+
+                if (
+                    self.settings.stealth_mode is True
+                    and self.decision["amount"] >= top_points_on_chosen
+                    and top_points_on_chosen > 0 # only if top_points is meaningful
+                ):
+                    # from random import uniform # Already imported at the top
+                    reduce_amount = uniform(1, 5)
+                    self.decision["amount"] = int(top_points_on_chosen - reduce_amount)
+
+            # Universal final adjustments for amount (applies to Kelly as well after its specific calculation)
+            self.decision["amount"] = int(self.decision["amount"]) # Ensure integer
+
+            # Apply minimum_points constraint if amount is positive
+            if self.decision["amount"] > 0 and self.settings.minimum_points > 0:
+                 # Only apply minimum_points if current amount is less than minimum_points
+                 # and also ensure it doesn't exceed max_points or balance
+                if self.decision["amount"] < self.settings.minimum_points:
+                    self.decision["amount"] = min(self.settings.minimum_points, self.settings.max_points, balance)
+
+            if self.decision["amount"] < 0: # Safety: amount should not be negative
+                self.decision["amount"] = 0
+        else: # If no choice was made by any strategy
+            self.decision["amount"] = 0 # Ensure amount is zero
+
         return self.decision

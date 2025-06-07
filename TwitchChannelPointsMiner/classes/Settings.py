@@ -21,8 +21,14 @@ class FollowersOrder(Enum):
 # Empty object shared between class
 class Settings(object):
     __slots__ = ["logger", "streamer_settings",
-                 "enable_analytics", "disable_ssl_cert_verification", "disable_at_in_nickname"]
+                 "enable_analytics", "disable_ssl_cert_verification", "disable_at_in_nickname",
+                 "auto_select_strategy", "auto_select_strategy_days", "auto_selected_strategy_override", "log_file_path"]
 
+# Initialize static members for Settings
+Settings.auto_select_strategy = False
+Settings.auto_select_strategy_days = 7
+Settings.auto_selected_strategy_override = None
+Settings.log_file_path = None
 
 class Events(Enum):
     STREAMER_ONLINE = auto()

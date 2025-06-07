@@ -610,6 +610,52 @@ Allowed values for `chat` are:
 - **NUMBER_6**: Always select the 6th option
 - **NUMBER_7**: Always select the 7th option
 - **NUMBER_8**: Always select the 8th option
+- **KELLY_CRITERION**: Uses the Kelly Criterion formula to determine the optimal fraction of your channel points to bet. This strategy aims to maximize long-term growth of your points by balancing the probability of winning and the payout odds.
+
+#### Kelly Criterion (`Strategy.KELLY_CRITERION`)
+
+This strategy uses the Kelly Criterion formula to determine the optimal fraction of your channel points to bet. The formula is `f* = (bp - q) / b`, where:
+- `f*` is the fraction of your current points to bet.
+- `b` is the net odds received on the wager (e.g., if odds are 2.5x, `b` is 1.5).
+- `p` is the probability of winning.
+- `q` is the probability of losing (`1 - p`).
+
+**Configuration Parameters (in `BetSettings`):**
+- `strategy=Strategy.KELLY_CRITERION`: Activates the strategy.
+- `kelly_fraction (float)`: A multiplier (0.0 to 1.0+) for the calculated `f*`. A value of `1.0` uses the full Kelly fraction. Values less than 1.0 (e.g., 0.5 for "half Kelly") are more conservative. Default: `0.5`.
+- `kelly_probability_source (KellyProbabilitySource)`: Determines how `p` (probability of winning) is estimated:
+    - `KellyProbabilitySource.ODDS_PERCENTAGE`: `p` is derived from the inverse of the outcome's odds (e.g., if an outcome has 2.0x odds, `p` is implicitly 1/2.0 = 0.5 or 50% `odds_percentage`). This is the default.
+    - `KellyProbabilitySource.USER_PERCENTAGE`: `p` is derived from the percentage of users betting on that outcome.
+- `max_points (int)`: The maximum number of points to bet, even if Kelly Criterion calculates a higher amount.
+- `minimum_points (int)`: If the calculated bet amount is positive but less than this value, the bet will be placed for `minimum_points` (respecting `max_points` and balance). If the calculated amount is less than 10 (Twitch minimum), it won't be placed by `Twitch.py` regardless.
+
+**Behavior:**
+- The strategy calculates `f*` for each available betting outcome.
+- It will choose the outcome with the highest positive `f*`.
+- If no outcome has a positive `f*` (i.e., no bet has a positive expected value according to Kelly), no bet will be placed.
+- The actual amount bet is `current_channel_points * f_star_chosen_outcome * kelly_fraction`.
+- This amount is then capped by `max_points` and potentially adjusted by `minimum_points`.
+- Logging for this strategy is enhanced to show `p`, `b`, raw `f*`, and the applied Kelly fraction when a bet is made or considered.
+
+**Python Configuration Example (Global Default):**
+```python
+from TwitchChannelPointsMiner.classes.entities.Bet import (
+    BetSettings, Strategy, KellyProbabilitySource, DelayMode
+)
+
+default_kelly_bet_settings = BetSettings(
+    strategy=Strategy.KELLY_CRITERION,
+    max_points=25000,
+    minimum_points=100,
+    kelly_fraction=0.3,  # Bet 30% of the calculated Kelly stake
+    kelly_probability_source=KellyProbabilitySource.ODDS_PERCENTAGE,
+    delay_mode=DelayMode.FROM_END, # Standard delay settings still apply
+    delay=10
+)
+
+# This would then be part of your StreamerSettings passed to TwitchChannelPointsMiner
+# global_streamer_settings = StreamerSettings(bet=default_kelly_bet_settings, ...)
+```
 
 ![Screenshot](https://raw.githubusercontent.com/Tkd-Alex/Twitch-Channel-Points-Miner-v2/master/assets/prediction.png)
 
@@ -659,6 +705,48 @@ Here's a concrete example. Let's suppose we have a bet that is opened with a tim
 - **FROM_START** with `delay=20`: The bet will be placed 20s after the bet is opened
 - **FROM_END** with `delay=20`: The bet will be placed 20s before the end of the bet (so 9mins 40s after the bet is opened)
 - **PERCENTAGE** with `delay=0.2`: The bet will be placed when the timer went down by 20% (so 2mins after the bet is opened)
+
+## Advanced Features
+
+### Automatic Strategy Selection
+
+The miner can automatically select the optimal betting strategy based on historical performance logged by the miner itself. This feature helps in adapting to what works best over time without manual intervention.
+
+**How it Works:**
+1.  **Log Analysis**: When enabled, the miner reads its own log files (e.g., `your-username.log`) at startup.
+2.  **Performance Calculation**: It parses past betting events to calculate the Return on Investment (ROI) and total number of bets for each strategy used within a defined period (e.g., the last 7 days).
+3.  **Strategy Selection**:
+    *   It identifies the strategy with the highest positive ROI.
+    *   To be considered, a strategy must have a minimum number of bets (currently 10) within the analysis period. This prevents switching to a strategy based on a small sample size (e.g., a single lucky win).
+4.  **Override**: If a suitable strategy is found, it overrides the `BetSettings.strategy` for all streamers for the current session. The originally configured `BetSettings` (like `max_points`, `kelly_fraction`, etc.) are still respected; only the strategy itself is changed.
+5.  **Logging**: The miner logs which strategy was auto-selected (if any) and the performance data (ROI, total bets) for all analyzed strategies. If no strategy meets the criteria (e.g., no strategy has positive ROI or enough bets), the configured default strategies are used.
+
+**Configuration (in `TwitchChannelPointsMiner` constructor):**
+- `auto_select_strategy (bool)`: Set to `True` to enable this feature. Default: `False`.
+- `auto_select_strategy_days (int)`: The number of past days of logs to analyze for strategy performance. Default: `7`.
+
+**Python Configuration Example:**
+```python
+# In your run.py or example.py
+miner = TwitchChannelPointsMiner(
+    username="your-twitch-username",
+    # ... other parameters ...
+    auto_select_strategy=True,
+    auto_select_strategy_days=14, # Analyze logs from the last 14 days
+    # ... other parameters ...
+)
+```
+
+**Note on Log Analysis (`log_analyzer.py`):**
+This feature relies on a new component, `LogAnalyzer`, which parses the miner's log files. For accurate performance metrics, ensure your logging level (`logger_settings` in `example.py`) is sufficient to capture betting results (INFO level usually suffices). The log format for betting decisions is crucial for the analyzer to work correctly.
+
+### Interpreting Logs for Strategy Performance
+The automatic strategy selection provides insights into how different strategies perform. You can also manually inspect the logs produced by `LogAnalyzer` (logged at INFO level when auto-selection runs) to understand:
+- **ROI per strategy**: How many points are gained or lost per point bet.
+- **Number of bets**: How frequently a strategy is used.
+- **Win/Loss rates**: The ratio of winning to losing bets for a strategy.
+
+This information can help you fine-tune your default `BetSettings` or decide if certain streamers should have manually overridden strategies if their betting patterns differ significantly.
 
 ## Analytics
 We have recently introduced a little frontend where you can show with a chart you points trend. The script will spawn a Flask web-server on your machine where you can select binding address and port.

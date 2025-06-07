@@ -691,16 +691,29 @@ class Twitch(object):
             if streamer.settings.community_goals is True:
                 self.contribute_to_community_goals(streamer)
 
+from TwitchChannelPointsMiner.classes.entities.Bet import Strategy as BetStrategyEnum # Add this import
+
+# ... (other imports remain the same) ...
+
+class Twitch(object):
+# ... (rest of the class before make_predictions) ...
     def make_predictions(self, event):
         decision = event.bet.calculate(event.streamer.channel_points)
         # selector_index = 0 if decision["choice"] == "A" else 1
 
         logger.info(
-            f"Going to complete bet for {event}",
             extra={
                 "emoji": ":four_leaf_clover:",
                 "event": Events.BET_GENERAL,
             },
+        )
+        logger.info(
+            f"Betting strategy for event '{event.title}': {event.streamer.settings.bet.strategy.name}", # Uses .name for enum
+            extra={"emoji": ":gear:", "event": Events.BET_GENERAL}
+        )
+        logger.info(
+            f"Bet settings for event '{event.title}': {event.streamer.settings.bet}", # Uses __repr__
+            extra={"emoji": ":wrench:", "event": Events.BET_GENERAL}
         )
         if event.status == "ACTIVE":
             skip, compared_value = event.bet.skip()
@@ -723,12 +736,21 @@ class Twitch(object):
                 if decision["amount"] >= 10:
                     logger.info(
                         # f"Place {_millify(decision['amount'])} channel points on: {event.bet.get_outcome(selector_index)}",
-                        f"Place {_millify(decision['amount'])} channel points on: {event.bet.get_outcome(decision['choice'])}",
+                        f"Place {_millify(decision['amount'])} (Raw: {decision['amount']}) channel points on: {event.bet.get_outcome(decision['choice'])}",
                         extra={
                             "emoji": ":four_leaf_clover:",
                             "event": Events.BET_GENERAL,
                         },
                     )
+                    if event.streamer.settings.bet.strategy == BetStrategyEnum.KELLY_CRITERION and "kelly_details" in decision:
+                        kd = decision["kelly_details"]
+                        logger.info(
+                            f"Kelly Criterion Details: Chosen Outcome Index: {decision['choice']}, "
+                            f"P={kd['p']:.4f}, B={kd['b']:.2f}, Raw F*={kd['f_star_raw']:.4f}, "
+                            f"KellyFracSetting={kd['kelly_fraction_applied']:.2f}, "
+                            f"Final Bet Amount={_millify(decision['amount'])} (Raw: {decision['amount']})",
+                            extra={"emoji": ":chart_with_upwards_trend:", "event": Events.BET_GENERAL}
+                        )
 
                     json_data = copy.deepcopy(GQLOperations.MakePrediction)
                     json_data["variables"] = {
@@ -754,14 +776,25 @@ class Twitch(object):
                                 "event": Events.BET_FAILED,
                             },
                         )
-                else:
+                else: # decision["amount"] < 10
                     logger.info(
-                        f"Bet won't be placed as the amount {_millify(decision['amount'])} is less than the minimum required 10",
-                        extra={
-                            "emoji": ":four_leaf_clover:",
-                            "event": Events.BET_GENERAL,
-                        },
+                        f"Bet won't be placed as the calculated amount {_millify(decision['amount'])} (raw: {decision['amount']}) is less than the minimum required 10.",
+                        extra={"emoji": ":no_entry_sign:", "event": Events.BET_GENERAL,},
                     )
+                    if event.streamer.settings.bet.strategy == BetStrategyEnum.KELLY_CRITERION:
+                        if "kelly_details" in decision: # Means Kelly calculated a positive but small amount
+                            kd = decision["kelly_details"]
+                            logger.info(
+                                f"Kelly Criterion Calculation (led to small amount): "
+                                f"P={kd['p']:.4f}, B={kd['b']:.2f}, Raw F*={kd['f_star_raw']:.4f}, "
+                                f"KellyFracSetting={kd['kelly_fraction_applied']:.2f}",
+                                extra={"emoji": ":magnifying_glass_tilt_left:", "event": Events.BET_GENERAL}
+                            )
+                        elif decision.get("choice") is None: # Means Kelly decided not to bet at all (f* <= 0)
+                            logger.info(
+                                "Kelly Criterion: No bet placed as no outcome had a positive expected value (f* <= 0 for all outcomes).",
+                                extra={"emoji":":thought_balloon:", "event": Events.BET_GENERAL}
+                            )
         else:
             logger.info(
                 f"Oh no! The event is not active anymore! Current status: {event.status}",

@@ -79,6 +79,8 @@ class TwitchChannelPointsMiner:
         enable_analytics: bool = False,
         disable_ssl_cert_verification: bool = False,
         disable_at_in_nickname: bool = False,
+        auto_select_strategy: bool = False,
+        auto_select_strategy_days: int = 7,
         # Settings for logging and selenium as you can see.
         priority: list = [Priority.STREAK, Priority.DROPS, Priority.ORDER],
         # This settings will be global shared trought Settings class
@@ -86,6 +88,9 @@ class TwitchChannelPointsMiner:
         # Default values for all streamers
         streamer_settings: StreamerSettings = StreamerSettings(),
     ):
+        Settings.auto_select_strategy = auto_select_strategy
+        Settings.auto_select_strategy_days = auto_select_strategy_days
+        Settings.auto_selected_strategy_override = None
         # Fixes TypeError: 'NoneType' object is not subscriptable
         if not username or username == "your-twitch-username":
             logger.error("Please edit your runner file (usually run.py) and try again.")
@@ -156,6 +161,7 @@ class TwitchChannelPointsMiner:
         self.logs_file, self.queue_listener = configure_loggers(
             self.username, logger_settings
         )
+        Settings.log_file_path = self.logs_file
 
         # Check for the latest version of the script
         current_version, github_version = check_versions()
@@ -217,6 +223,12 @@ class TwitchChannelPointsMiner:
         followers: bool = False,
         followers_order: FollowersOrder = FollowersOrder.ASC,
     ):
+        from TwitchChannelPointsMiner.log_analyzer import LogAnalyzer
+        from datetime import datetime, timedelta
+        from TwitchChannelPointsMiner.classes.entities.Bet import Strategy as BetStrategyEnum
+        import logging # Ensure logger is available if not already
+        logger = logging.getLogger(__name__) # Ensure logger is defined
+
         if self.running:
             logger.error("You can't start multiple sessions of this instance!")
         else:
@@ -227,6 +239,50 @@ class TwitchChannelPointsMiner:
             self.start_datetime = datetime.now()
 
             self.twitch.login()
+
+            if Settings.auto_select_strategy is True and Settings.log_file_path is not None:
+                logger.info("Attempting to automatically select the best strategy based on logs.")
+                analyzer = LogAnalyzer(Settings.log_file_path)
+
+                from_date_filter = datetime.now() - timedelta(days=Settings.auto_select_strategy_days)
+                # Ensure parse_logs is called before analyze_performance if it's not called inside
+                analyzer.parse_logs()
+                performance_data = analyzer.analyze_performance(from_date=from_date_filter)
+
+                best_strategy_name = None
+                highest_roi = -float('inf')
+                min_bets_threshold = 10 # Minimum bets for a strategy to be considered
+
+                if not performance_data:
+                    logger.info("No performance data found in logs for automatic strategy selection.")
+                else:
+                    logger.info(f"Performance Data for Auto-Selection (last {Settings.auto_select_strategy_days} days):")
+                    for strat_name_key, stats_dict in performance_data.items():
+                        logger.info(f"  Strategy: {strat_name_key}, ROI: {stats_dict.get('roi', 0):.2f}, Bets: {stats_dict.get('total_bets',0)}, Wins: {stats_dict.get('wins',0)}, Losses: {stats_dict.get('losses',0)}")
+
+                        current_roi = stats_dict.get('roi', 0)
+                        # Criteria: Must have made min_bets_threshold, must have positive ROI, and must be better than current best_roi
+                        if stats_dict.get('total_bets', 0) >= min_bets_threshold and current_roi > 0:
+                            if current_roi > highest_roi:
+                                highest_roi = current_roi
+                                best_strategy_name = strat_name_key
+                            # Optional: Tie-breaking: if current_roi == highest_roi and stats_dict.get('total_bets',0) > performance_data.get(best_strategy_name,{}).get('total_bets',0):
+                            #    best_strategy_name = strat_name_key
+
+                if best_strategy_name:
+                    try:
+                        Settings.auto_selected_strategy_override = BetStrategyEnum[best_strategy_name.upper()]
+                        logger.info(f"Automatically selected strategy: {Settings.auto_selected_strategy_override} (ROI: {highest_roi:.2f}) based on {performance_data[best_strategy_name]['total_bets']} bets.")
+                    except KeyError:
+                        logger.error(f"Failed to convert best strategy name '{best_strategy_name}' to Enum. Using default strategies.")
+                        Settings.auto_selected_strategy_override = None
+                else:
+                    logger.info("No strategy met the criteria for automatic selection (e.g., insufficient bets or no positive ROI). Using configured strategies.")
+                    Settings.auto_selected_strategy_override = None
+            else:
+                if Settings.auto_select_strategy is True and Settings.log_file_path is None:
+                    logger.warning("Automatic strategy selection enabled, but log file path is not available.")
+                Settings.auto_selected_strategy_override = None # Ensure it's None if auto-select is off
 
             if self.claim_drops_startup is True:
                 self.twitch.claim_all_drops_from_inventory()
@@ -275,6 +331,17 @@ class TwitchChannelPointsMiner:
                         streamer.settings.bet = set_default_settings(
                             streamer.settings.bet, Settings.streamer_settings.bet
                         )
+                        if Settings.auto_selected_strategy_override is not None:
+                            # Ensure streamer.settings and streamer.settings.bet exist
+                            if streamer.settings and hasattr(streamer.settings, 'bet') and streamer.settings.bet is not None:
+                                original_strategy = streamer.settings.bet.strategy
+                                if original_strategy != Settings.auto_selected_strategy_override:
+                                    streamer.settings.bet.strategy = Settings.auto_selected_strategy_override
+                                    logger.info(f"For streamer {streamer.username}, overriding strategy {original_strategy.name if hasattr(original_strategy, 'name') else original_strategy} with auto-selected {Settings.auto_selected_strategy_override.name if hasattr(Settings.auto_selected_strategy_override, 'name') else Settings.auto_selected_strategy_override}.")
+                                else:
+                                    logger.info(f"For streamer {streamer.username}, configured strategy {original_strategy.name if hasattr(original_strategy, 'name') else original_strategy} matches auto-selected. No override needed.")
+                            else:
+                                logger.warning(f"Could not apply auto-selected strategy for {streamer.username}: streamer.settings.bet is not properly initialized.")
                         if streamer.settings.chat != ChatPresence.NEVER:
                             streamer.irc_chat = ThreadChat(
                                 self.username,
