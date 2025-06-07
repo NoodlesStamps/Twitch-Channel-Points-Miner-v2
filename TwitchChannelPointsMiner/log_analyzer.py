@@ -39,7 +39,7 @@ class LogAnalyzer:
             r"event_id=([^,]+)\s*,\s*"
             r"streamer=Streamer\(username=([^,]+),.*\)\s*,\s*"
             r"title=([^)]+)\)\s*"
-            r"Bet\(.*decision=.*amount':\s*(\d+).*?\).*?" # amount before millify
+            r"Bet\(.*decision=.*'amount':\s*(\d+).*?\).*?" # amount before millify
             r"Result:\s*(WIN|LOSE|REFUND|CANCELLED|LOCKED)\s*,\s*"
             r"(?:Gained|Lost|Action|Refunded):\s*([+-]?[\d\.,kmbtKMGT]+)" # points_gained after millify
         )
