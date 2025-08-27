@@ -7,8 +7,10 @@ import copy
 import logging
 import os
 import pickle
+import base64
 
 # import webbrowser
+#         return self.get_cookie_value("auth-token")"""
 # import browser_cookie3
 
 import requests
@@ -328,6 +330,19 @@ class TwitchLogin(object):
             self.cookies = pickle.load(open(cookies_file, "rb"))
         else:
             raise WrongCookiesException("There must be a cookies file!")
+
+    def load_cookies_from_env(self):
+        """Loads cookies from a base64 encoded environment variable."""
+        pickle_data_b64 = os.environ.get("TWITCH_COOKIES_DATA")
+        if pickle_data_b64:
+            try:
+                pickle_data = base64.b64decode(pickle_data_b64)
+                self.cookies = pickle.loads(pickle_data)
+                logger.info("Successfully loaded cookies from environment variable.")
+                return True
+            except Exception as e:
+                logger.error(f"Failed to load cookies from environment variable: {e}")
+        return False
 
     def get_user_id(self):
         persistent = self.get_cookie_value("persistent")

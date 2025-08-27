@@ -87,7 +87,9 @@ class Twitch(object):
         )
 
     def login(self):
-        if not os.path.isfile(self.cookies_file):
+        if self.twitch_login.load_cookies_from_env():
+            self.twitch_login.set_token(self.twitch_login.get_auth_token())
+        elif not os.path.isfile(self.cookies_file):
             if self.twitch_login.login_flow():
                 self.twitch_login.save_cookies(self.cookies_file)
         else:
